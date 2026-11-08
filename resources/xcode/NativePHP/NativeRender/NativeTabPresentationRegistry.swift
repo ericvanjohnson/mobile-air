@@ -22,8 +22,123 @@ func nativeTabPresentationSelectedIdentifier(sourceIdentifiers: [String],
     return nativeTabPresentationIdentifier(sourceIdentifier: sourceIdentifier, index: selectedIndex)
 }
 
-func nativeTabPresentationIsHidden(explicitlyHidden: Bool, hasPushedDestination: Bool) -> Bool {
-    explicitlyHidden || hasPushedDestination
+func nativeTabPresentationIsHidden(explicitlyHidden: Bool, hasPushedDestination: Bool,
+                                   keepsOnPush: Bool = false) -> Bool {
+    explicitlyHidden || (hasPushedDestination && !keepsOnPush)
+}
+
+public enum NativeTabPresentationPlacement: String, Sendable {
+    case bottom
+    case leading
+
+    public init(wire: String?) {
+        self = wire.flatMap(Self.init(rawValue:)) ?? .bottom
+    }
+}
+
+func nativeTabPresentationIsActive(minimumWidth: Double?, minimumHeight: Double?,
+                                   windowSize: CGSize) -> Bool {
+    if minimumWidth == nil, minimumHeight == nil { return true }
+    guard windowSize.width > 0, windowSize.height > 0 else { return false }
+    if let minimumWidth, Double(windowSize.width) < minimumWidth { return false }
+    if let minimumHeight, Double(windowSize.height) < minimumHeight { return false }
+    return true
+}
+
+/// What a presenter's tap on a tab does.
+enum NativeTabActivation: Equatable {
+    /// Sends the tab's own press and leaves `selection` alone. Action tabs
+    /// have no screen to show, so selecting them would flash an empty tab.
+    case pressAction
+    /// The already selected, owning tab was tapped again.
+    case reselect
+    /// The tab is already selected, so activate it directly.
+    case activate
+    /// Move `selection`, which activates the tab through `onChange`.
+    case select
+}
+
+func nativeTabActivation(identifier: String, url: String, isSearch: Bool,
+                         selection: String, owningId: String, hasPendingTab: Bool) -> NativeTabActivation {
+    if url.isEmpty && !isSearch { return .pressAction }
+    if selection == identifier, identifier == owningId, !hasPendingTab { return .reselect }
+    if selection == identifier { return .activate }
+    return .select
+}
+
+/// Indices into the full tab list of the tabs the TabView should declare.
+/// Presentation-only tabs exist only while a custom presentation is active.
+/// Indices always refer to the full list, so coordinators, descriptor ids and
+/// activation stay keyed the same way whichever tabs are left out.
+func nativeTabEligibleIndices(presentationOnly: [Bool], usesCustomPresentation: Bool) -> [Int] {
+    presentationOnly.indices.filter { usesCustomPresentation || !presentationOnly[$0] }
+}
+
+/// Nav-bar actions to draw. While a custom tab presentation is showing,
+/// actions flagged `hidden_with_tab_presentation` (PHP
+/// `NavAction::hiddenWithTabPresentation()`) are left out because the
+/// presentation already offers them; otherwise every action is kept.
+func nativeVisibleNavActions(_ actions: [NativeUINode], tabPresentationActive: Bool) -> [NativeUINode] {
+    guard tabPresentationActive else { return actions }
+    return actions.filter { !$0.props.getBool("hidden_with_tab_presentation") }
+}
+
+private struct NativeTabPresentationActiveKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// True while the root tabs draw a custom presentation (side rail)
+    /// instead of the stock tab bar. Set by `NativeRootTabsRenderer`.
+    var nativeTabPresentationActive: Bool {
+        get { self[NativeTabPresentationActiveKey.self] }
+        set { self[NativeTabPresentationActiveKey.self] = newValue }
+    }
+}
+
+/// The tab whose URL is the longest match for `currentUri`, or nil when no
+/// candidate URL matches. Path match, so a query on the current URI still
+/// belongs to its tab; a tab URL with its own query matches the full URI and
+/// wins by being longer. Same rule as `TabBar::highlight()`.
+func nativeTabUrlOwnerIndex(currentUri: String, candidates: [(index: Int, url: String)]) -> Int? {
+    guard !currentUri.isEmpty else { return nil }
+    let currentPath = PerTabNavigationCoordinator.path(of: currentUri)
+    var best: (index: Int, length: Int)?
+    for candidate in candidates where !candidate.url.isEmpty {
+        let isMatch = currentUri == candidate.url
+            || currentPath == candidate.url
+            || currentPath.hasPrefix(candidate.url + "/")
+        if isMatch, candidate.url.count > (best?.length ?? -1) {
+            best = (candidate.index, candidate.url.count)
+        }
+    }
+    return best?.index
+}
+
+/// The tab that owns `currentUri`, chosen from `candidates` by URL match
+/// (see `nativeTabUrlOwnerIndex`). Falls back to the first active
+/// candidate, then the first candidate, then 0.
+func nativeTabOwningIndex(currentUri: String,
+                          candidates: [(index: Int, url: String, isActive: Bool)]) -> Int {
+    nativeTabUrlOwnerIndex(currentUri: currentUri,
+                           candidates: candidates.map { (index: $0.index, url: $0.url) })
+        ?? candidates.first(where: \.isActive)?.index
+        ?? candidates.first?.index
+        ?? 0
+}
+
+/// The index of the tab that owns `currentUri` across ALL tabs, when that tab
+/// is not declared right now (a presentation-only tab while the presentation
+/// is inactive). The renderer must not sync such a URI into the fallback
+/// tab's stack; it asks the fallback tab to activate instead so PHP replaces
+/// the URI. Nil when the real owner is declared or nothing matches.
+func nativeTabHiddenOwnerIndex(currentUri: String,
+                               tabs: [(url: String, isEligible: Bool)]) -> Int? {
+    guard let owner = nativeTabUrlOwnerIndex(
+        currentUri: currentUri,
+        candidates: tabs.enumerated().map { (index: $0.offset, url: $0.element.url) }
+    ), !tabs[owner].isEligible else { return nil }
+    return owner
 }
 
 public struct NativeTabDescriptor: Identifiable, Sendable {
@@ -104,15 +219,18 @@ public struct NativeTabPresentationContext {
     public let selectedTabIdentifier: String
     public let configuration: NativeTabPresentationConfiguration
     public let isHidden: Bool
+    public let isPushed: Bool
     private let activation: (String) -> Void
 
     public init(tabs: [NativeTabDescriptor], selectedTabIdentifier: String,
                 configuration: NativeTabPresentationConfiguration, isHidden: Bool,
+                isPushed: Bool = false,
                 activate: @escaping (String) -> Void) {
         self.tabs = tabs
         self.selectedTabIdentifier = selectedTabIdentifier
         self.configuration = configuration
         self.isHidden = isHidden
+        self.isPushed = isPushed
         self.activation = activate
     }
 
@@ -128,6 +246,7 @@ public final class NativeTabPresentationRegistry {
     public static let shared = NativeTabPresentationRegistry()
 
     private var presenters: [String: NativeTabPresenter] = [:]
+    private var overlays: [String: NativeTabPresenter] = [:]
     private let lock = NSLock()
 
     private init() {}
@@ -135,6 +254,14 @@ public final class NativeTabPresentationRegistry {
     /// Registers a presenter. The first registration for an identifier wins.
     @discardableResult
     public func register(identifier: String, presenter: @escaping NativeTabPresenter) -> Bool {
+        register(identifier: identifier, presenter: presenter, overlay: nil)
+    }
+
+    /// Registers a presenter with an optional overlay drawn above the tab content.
+    /// The presenter and overlay are stored as one pair, so the first registration wins.
+    @discardableResult
+    public func register(identifier: String, presenter: @escaping NativeTabPresenter,
+                         overlay: NativeTabPresenter?) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard presenters[identifier] == nil else {
@@ -142,6 +269,7 @@ public final class NativeTabPresentationRegistry {
             return false
         }
         presenters[identifier] = presenter
+        overlays[identifier] = overlay
         return true
     }
 
@@ -149,6 +277,12 @@ public final class NativeTabPresentationRegistry {
         lock.lock()
         defer { lock.unlock() }
         return presenters[identifier]
+    }
+
+    func overlay(for identifier: String) -> NativeTabPresenter? {
+        lock.lock()
+        defer { lock.unlock() }
+        return overlays[identifier]
     }
 
     func resolve(identifier: String,
@@ -166,6 +300,7 @@ public final class NativeTabPresentationRegistry {
     func resetForTesting() {
         lock.lock()
         presenters.removeAll()
+        overlays.removeAll()
         lock.unlock()
     }
 }

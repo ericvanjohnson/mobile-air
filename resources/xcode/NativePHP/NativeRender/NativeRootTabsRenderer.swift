@@ -63,6 +63,11 @@ struct NativeRootTabsRenderer: View {
     @StateObject private var tabBag = TabCoordinatorBag()
     @State private var customPresentationHiddenForPush = false
 
+    /// The renderer's own size, which decides whether a custom tab
+    /// presentation with minimum-size requirements is active. Switching
+    /// only changes modifiers; the TabView and `selection` are kept.
+    @State private var tabsSize: CGSize = .zero
+
     /// The tab the user most recently tapped, while its `replace`
     /// navigation is still in flight PHP-side. Cleared when a publish
     /// settles the race (see "Rapid re-taps" in the header comment).
@@ -77,6 +82,43 @@ struct NativeRootTabsRenderer: View {
         let tabs = node.children.filter { $0.type == "bottom_nav_item" }
         let accessory = node.children.first { $0.type == "tab_accessory" }
         let currentUri = node.props.getString("current_uri", default: "")
+
+        // A custom presentation resolves from the registry, then applies
+        // only while the window meets its minimum size. Resolved but not
+        // active renders exactly like no presenter at all.
+        let presentationIdentifier = node.props.getString("tab_presentation_id", default: "")
+        let requestsCustomPresentation = !presentationIdentifier.isEmpty && presentationIdentifier != "system"
+        let presentationJSON = requestsCustomPresentation
+            ? node.props.getString("tab_presentation_configuration", default: "")
+            : ""
+        let presentationConfiguration = requestsCustomPresentation
+            ? NativeTabPresentationConfiguration(json: presentationJSON)
+            : nil
+        let customPresenter = NativeTabPresentationRegistry.shared.resolve(
+            identifier: presentationIdentifier,
+            configuration: presentationConfiguration
+        )
+        let usesCustomPresentation = customPresenter != nil && nativeTabPresentationIsActive(
+            minimumWidth: optionalNumber(node.props, "tab_presentation_min_width"),
+            minimumHeight: optionalNumber(node.props, "tab_presentation_min_height"),
+            windowSize: tabsSize
+        )
+        let presentationPlacement = NativeTabPresentationPlacement(
+            wire: node.props.getString("tab_presentation_placement", default: "")
+        )
+        let customPresentationOverlay = usesCustomPresentation
+            ? NativeTabPresentationRegistry.shared.overlay(for: presentationIdentifier)
+            : nil
+
+        // Every index below points into the full `tabs` list, whichever
+        // tabs are left out, so per-tab coordinators, descriptor ids and
+        // activation never shift when a presentation switches on or off.
+        // Presentation-only tabs are declared only while one is active.
+        let eligibleTabIndices = nativeTabEligibleIndices(
+            presentationOnly: tabs.map { $0.props.getBool("presentation_only") },
+            usesCustomPresentation: usesCustomPresentation
+        )
+
         // Determine which tab "owns" the current URI via longest URL
         // prefix match against tab URLs. This is what lets a pushed
         // sub-route (e.g. `/syncup-native/chat/123` under a
@@ -84,17 +126,45 @@ struct NativeRootTabsRenderer: View {
         // NavigationStack rather than full-screen-replacing the layout.
         // Falls back to `BottomNavItem.active` (TabBar::highlight set
         // the same way) so non-prefix tab layouts still pick correctly.
-        let owningIdx = owningTabIndex(for: currentUri, tabs: tabs)
-            ?? (tabs.firstIndex { $0.props.getBool("active") } ?? 0)
+        let owningIdx = nativeTabOwningIndex(
+            currentUri: currentUri,
+            candidates: eligibleTabIndices.map { index in
+                (
+                    index: index,
+                    url: tabs[index].props.getString("url", default: ""),
+                    isActive: tabs[index].props.getBool("active")
+                )
+            }
+        )
         let owningId = owningIdx < tabs.count
             ? tabs[owningIdx].props.getString("id", default: "")
             : ""
+
+        // The URI can belong to a presentation-only tab that isn't declared
+        // right now (the window just got narrower). Syncing it into the
+        // fallback tab would push that screen onto the wrong stack, so skip
+        // the sync and let `redirectFromHiddenOwner` ask the fallback tab
+        // to activate, which makes PHP replace the URI.
+        let isOwnedByHiddenTab = nativeTabHiddenOwnerIndex(
+            currentUri: currentUri,
+            tabs: tabs.indices.map { index in
+                (
+                    url: tabs[index].props.getString("url", default: ""),
+                    isEligible: eligibleTabIndices.contains(index)
+                )
+            }
+        ) != nil
+        // Before the first geometry callback a presenter with minimums looks
+        // inactive, so wait for a real size before redirecting; otherwise a
+        // launch into a presentation-only tab on a wide window would bounce.
+        let canRedirectFromHiddenTab = customPresenter == nil || tabsSize != .zero
+        let hiddenOwnerUri = isOwnedByHiddenTab && canRedirectFromHiddenTab ? currentUri : ""
 
         // Sync the owning tab's coordinator with this publish — cache
         // synchronously so the destination resolver always sees the
         // freshest tree, then defer the path mutation (push / pop) via
         // async since `path` is @Published.
-        if !currentUri.isEmpty, owningIdx < tabs.count {
+        if !currentUri.isEmpty, !isOwnedByHiddenTab, owningIdx < tabs.count {
             let owningRootUri = tabs[owningIdx].props.getString("url", default: "")
             let stackDepth = node.props.getInt("stack_depth", default: 0)
             let coord = tabBag.coordinator(forIdx: owningIdx, rootUri: owningRootUri)
@@ -165,10 +235,10 @@ struct NativeRootTabsRenderer: View {
         // is a per-publish FlatBuffer index that regenerates each tree, so
         // it isn't a stable ForEach identity across publishes. The PHP-side
         // slugified id (e.g. "home", "profile") is stable.
-        let regularTabEntries: [(id: String, idx: Int, tab: NativeUINode)] = tabs
-            .enumerated()
-            .compactMap { idx, tab in
-                tab.props.getBool("search")
+        let regularTabEntries: [(id: String, idx: Int, tab: NativeUINode)] = eligibleTabIndices
+            .compactMap { idx in
+                let tab = tabs[idx]
+                return tab.props.getBool("search")
                     ? nil
                     : (id: tab.props.getString("id", default: "tab_\(idx)"), idx: idx, tab: tab)
             }
@@ -177,7 +247,7 @@ struct NativeRootTabsRenderer: View {
         // search tabs (`if selectedTab == 0 || selectedTab == 3`).
         // Putting it inside a ForEach with the regular tabs causes the
         // entire bar to drop out when the tab appears/disappears.
-        let searchTabIdx = tabs.firstIndex { $0.props.getBool("search") }
+        let searchTabIdx = eligibleTabIndices.first { tabs[$0].props.getBool("search") }
         let searchTabIdString: String? = searchTabIdx.map { idx in
             tabs[idx].props.getString("id", default: "tab_\(idx)")
         }
@@ -192,22 +262,11 @@ struct NativeRootTabsRenderer: View {
             || !searchItemNodes.isEmpty
             || selection == searchTabIdString
 
-        let visibleTabEntries = tabs.enumerated().compactMap { index, tab in
-            (!tab.props.getBool("search") || shouldShowSearchTab) ? (index, tab) : nil
+        let visibleTabEntries: [(Int, NativeUINode)] = eligibleTabIndices.compactMap { index in
+            let tab = tabs[index]
+            return (!tab.props.getBool("search") || shouldShowSearchTab) ? (index, tab) : nil
         }
-        let presentationIdentifier = node.props.getString("tab_presentation_id", default: "")
-        let requestsCustomPresentation = !presentationIdentifier.isEmpty && presentationIdentifier != "system"
-        let presentationJSON = requestsCustomPresentation
-            ? node.props.getString("tab_presentation_configuration", default: "")
-            : ""
-        let presentationConfiguration = requestsCustomPresentation
-            ? NativeTabPresentationConfiguration(json: presentationJSON)
-            : nil
-        let customPresenter = NativeTabPresentationRegistry.shared.resolve(
-            identifier: presentationIdentifier,
-            configuration: presentationConfiguration
-        )
-        let descriptorEntries: [(index: Int, descriptor: NativeTabDescriptor)] = customPresenter == nil
+        let descriptorEntries: [(index: Int, descriptor: NativeTabDescriptor)] = !usesCustomPresentation
             ? []
             : visibleTabEntries.map { index, tab in
             let sourceId = tab.props.getString("id", default: "tab_\(index)")
@@ -232,9 +291,11 @@ struct NativeRootTabsRenderer: View {
         }
         let tabDescriptors = descriptorEntries.map(\.descriptor)
         let isRegularTabSelected = searchTabIdString.map { selection != $0 } ?? true
+        let hasPushedDestination = isRegularTabSelected && customPresentationHiddenForPush
         let hidesCustomPresentation = nativeTabPresentationIsHidden(
             explicitlyHidden: node.props.getBool("hide_tab_bar"),
-            hasPushedDestination: isRegularTabSelected && customPresentationHiddenForPush
+            hasPushedDestination: hasPushedDestination,
+            keepsOnPush: node.props.getBool("tab_presentation_keeps_on_push")
         )
         let presentationContext = presentationConfiguration.map { configuration in
             return NativeTabPresentationContext(
@@ -248,6 +309,7 @@ struct NativeRootTabsRenderer: View {
                 ),
                 configuration: configuration,
                 isHidden: hidesCustomPresentation,
+                isPushed: hasPushedDestination,
                 activate: { identifier in
                     guard let entry = descriptorEntries.first(where: { $0.descriptor.id == identifier }) else { return }
                     requestTabActivation(at: entry.index, tabs: tabs, owningId: owningId)
@@ -310,10 +372,11 @@ struct NativeRootTabsRenderer: View {
                         }
                     )
                     .modifier(SystemTabBarSuppressionModifier(
-                        suppressed: customPresenter != nil
+                        suppressed: usesCustomPresentation
                     ))
+                    .environment(\.nativeTabPresentationActive, usesCustomPresentation)
                     .background {
-                        if customPresenter == nil, tabId == selection, tabId == owningId,
+                        if !usesCustomPresentation, tabId == selection, tabId == owningId,
                            pendingTabId == nil, tab.props.getCallbackId("on_reselect") != 0 {
                             NativeTabReselectObserver {
                                 requestTabReselection(at: idx, tabs: tabs, owningId: owningId)
@@ -343,7 +406,7 @@ struct NativeRootTabsRenderer: View {
                         debounceMs: searchDebounceMs
                     )
                     .modifier(SystemTabBarSuppressionModifier(
-                        suppressed: customPresenter != nil
+                        suppressed: usesCustomPresentation
                     ))
                 }
                 .badge(badgeFor(searchTab))
@@ -356,14 +419,23 @@ struct NativeRootTabsRenderer: View {
         ))
         .preferredColorScheme(isDark ? .dark : nil)
         .modifier(TabBarLabelVisibilityModifier(mode: labelVisibility, fontName: chromeFontName))
-        .modifier(TabBarAccessoryModifier(accessory: customPresenter == nil ? accessory : nil))
+        .modifier(TabBarAccessoryModifier(accessory: accessory, isEnabled: !usesCustomPresentation))
         .modifier(CustomTabPresentationModifier(
-            presenter: customPresenter,
+            presenter: usesCustomPresentation ? customPresenter : nil,
+            overlay: customPresentationOverlay,
+            placement: presentationPlacement,
             context: presentationContext,
             accessory: accessory
         ))
+        // Measured outside the presentation modifier: the whole window, not
+        // the TabView a leading presenter narrows, so activation can't
+        // feed back on itself.
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+            tabsSize = size
+        }
         .onAppear {
             selection = owningId
+            redirectFromHiddenOwner(hiddenOwnerUri, owningIdx: owningIdx, tabs: tabs)
             if requestsCustomPresentation, customPresenter == nil {
                 let reason = presentationConfiguration == nil ? "invalid configuration" : "is not registered"
                 NativeTabPresentationRegistry.diagnostic(
@@ -378,6 +450,9 @@ struct NativeRootTabsRenderer: View {
                     "Tab presenter '\(presentationIdentifier)' \(reason); using the system tab bar."
                 )
             }
+        }
+        .onChange(of: hiddenOwnerUri) { uri in
+            redirectFromHiddenOwner(uri, owningIdx: owningIdx, tabs: tabs)
         }
         .onChange(of: owningId) { newId in
             // PHP-driven owning-tab change (publish landed under a
@@ -430,16 +505,37 @@ struct NativeRootTabsRenderer: View {
         }
     }
 
+    /// Sends the fallback tab's press when the current URI belongs to a
+    /// presentation-only tab that isn't declared, so PHP replaces the URI
+    /// with the fallback tab's own. Sent directly rather than through
+    /// `activateTab`, which skips the owning tab; no pending tab is recorded
+    /// because the resulting publish keeps the same owning tab.
+    private func redirectFromHiddenOwner(_ hiddenOwnerUri: String, owningIdx: Int, tabs: [NativeUINode]) {
+        guard !hiddenOwnerUri.isEmpty, tabs.indices.contains(owningIdx) else { return }
+        let tab = tabs[owningIdx]
+        guard tab.onPress != 0 else { return }
+        NativeElementBridge.sendPressEvent(tab.onPress, nodeId: tab.id)
+    }
+
     private func requestTabActivation(at index: Int, tabs: [NativeUINode], owningId: String) {
         guard tabs.indices.contains(index) else { return }
-        let identifier = tabs[index].props.getString("id", default: "tab_\(index)")
-        if selection == identifier, identifier == owningId, pendingTabId == nil {
+        let tab = tabs[index]
+        let identifier = tab.props.getString("id", default: "tab_\(index)")
+        switch nativeTabActivation(identifier: identifier,
+                                   url: tab.props.getString("url", default: ""),
+                                   isSearch: tab.props.getBool("search"),
+                                   selection: selection,
+                                   owningId: owningId,
+                                   hasPendingTab: pendingTabId != nil) {
+        case .pressAction:
+            if tab.onPress != 0 {
+                NativeElementBridge.sendPressEvent(tab.onPress, nodeId: tab.id)
+            }
+        case .reselect:
             requestTabReselection(at: index, tabs: tabs, owningId: owningId)
-            return
-        }
-        if selection == identifier {
+        case .activate:
             activateTab(at: index, tabs: tabs, owningId: owningId)
-        } else {
+        case .select:
             selection = identifier
         }
     }
@@ -485,33 +581,12 @@ struct NativeRootTabsRenderer: View {
         }
     }
 
-    /// Longest URL prefix match against tab URLs. A pushed sub-route
-    /// (e.g. `/syncup-native/chat/123`) returns the index of the tab
-    /// whose URL is the longest prefix of `currentUri`. Returns nil if
-    /// no tab claims the URI; the caller should fall back to PHP's
-    /// `BottomNavItem.active` flag.
-    ///
-    /// Matches on the path, so a screen opened with a query
-    /// (`/home?ref=push`) still belongs to the `/home` tab. A tab whose
-    /// own URL carries a query (`/remotes?tab=closed`) matches the full
-    /// URI, and being longer, wins. Same rule as `TabBar::highlight()`.
-    private func owningTabIndex(for currentUri: String, tabs: [NativeUINode]) -> Int? {
-        guard !currentUri.isEmpty else { return nil }
-        let currentPath = PerTabNavigationCoordinator.path(of: currentUri)
-        var bestIdx: Int? = nil
-        var bestLen: Int = -1
-        for (idx, tab) in tabs.enumerated() {
-            let tabUrl = tab.props.getString("url", default: "")
-            guard !tabUrl.isEmpty else { continue }
-            let isMatch = currentUri == tabUrl
-                || currentPath == tabUrl
-                || currentPath.hasPrefix(tabUrl + "/")
-            if isMatch && tabUrl.count > bestLen {
-                bestIdx = idx
-                bestLen = tabUrl.count
-            }
-        }
-        return bestIdx
+    /// A numeric prop, or nil when it is absent or not a number. Used for
+    /// presentation minimums, where absent means "no constraint".
+    private func optionalNumber(_ props: GenericProps, _ key: String) -> Double? {
+        guard let number = props.rawMap[key] as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        return number.doubleValue
     }
 
     /// On the new `Tab(value:role:)` API, `.badge` accepts a `Text?` — nil
@@ -748,8 +823,11 @@ private struct TabsToolbarModifier: ViewModifier {
     let textArgb: Int
     let bgArgb: Int
 
+    @Environment(\.nativeTabPresentationActive) private var tabPresentationActive
+
     func body(content: Content) -> some View {
         let textColor: Color = textArgb != 0 ? Color(argb: textArgb) : .primary
+        let visibleActions = nativeVisibleNavActions(actions, tabPresentationActive: tabPresentationActive)
         let toolbarScheme: ColorScheme? = {
             guard textArgb != 0 else { return nil }
             let r = Double((textArgb >> 16) & 0xFF) / 255.0
@@ -791,7 +869,7 @@ private struct TabsToolbarModifier: ViewModifier {
                     }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    ForEach(actions) { action in
+                    ForEach(visibleActions) { action in
                         TabsActionView(action: action, textColor: textColor)
                     }
                 }
@@ -1124,18 +1202,36 @@ private struct TabBarLabelVisibilityModifier: ViewModifier {
 /// build outright on Xcode 16 ("has no member 'tabViewBottomAccessory'").
 private struct TabBarAccessoryModifier: ViewModifier {
     let accessory: NativeUINode?
+    /// False while a custom tab presentation draws the accessory itself.
+    /// On iOS 26.1+ this toggles `isEnabled` so the TabView keeps its
+    /// identity when a presentation switches on or off.
+    var isEnabled: Bool = true
 
     func body(content: Content) -> some View {
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            if let inner = accessory?.children.first {
-                content
-                    .tabViewBottomAccessory {
-                        NodeView(node: inner)
-                    }
-            } else {
-                content
-            }
+        // `tabViewBottomAccessory(isEnabled:)` is in the iOS 26.1 SDK. Xcode
+        // 26.0 ships Swift 6.2 and Xcode 26.1 ships Swift 6.2.1, so 6.2.1 is
+        // the first compiler that is guaranteed to have the symbol; older
+        // iOS 26 toolchains keep the branching form below.
+        #if compiler(>=6.2.1)
+        if #available(iOS 26.1, *), let inner = accessory?.children.first {
+            content
+                .tabViewBottomAccessory(isEnabled: isEnabled) {
+                    NodeView(node: inner)
+                }
+        } else if #available(iOS 26.0, *), isEnabled, let inner = accessory?.children.first {
+            content
+                .tabViewBottomAccessory {
+                    NodeView(node: inner)
+                }
+        } else {
+            content
+        }
+        #elseif compiler(>=6.2)
+        if #available(iOS 26.0, *), isEnabled, let inner = accessory?.children.first {
+            content
+                .tabViewBottomAccessory {
+                    NodeView(node: inner)
+                }
         } else {
             content
         }
@@ -1147,16 +1243,35 @@ private struct TabBarAccessoryModifier: ViewModifier {
 
 /// Replaces only the visual tab strip. The underlying TabView and every
 /// per-tab NavigationStack remain mounted and owned by NativePHP.
+///
+/// Draws an active custom tab presentation on its edge, plus the optional
+/// bottom-trailing overlay. The containers and overlay are always attached
+/// and only their contents change, so turning a presentation on or off
+/// (rotate, fold, resize) never rebuilds the TabView or drops a pushed stack.
+///
+/// A leading presenter sits beside the TabView in an HStack rather than in a
+/// leading safe-area inset. Screen content draws full-bleed (scroll views,
+/// nav bars and window backgrounds all extend through horizontal safe areas),
+/// so an inset left it underneath the column. As a sibling, the TabView is
+/// laid out to the presenter's trailing side and follows its width as it
+/// animates. The TabView is always the HStack's second child, so its identity
+/// is the same whether or not the presenter slot is filled.
 private struct CustomTabPresentationModifier: ViewModifier {
     let presenter: NativeTabPresenter?
+    let overlay: NativeTabPresenter?
+    let placement: NativeTabPresentationPlacement
     let context: NativeTabPresentationContext?
     let accessory: NativeUINode?
 
     func body(content: Content) -> some View {
-        if let presenter, let context {
+        HStack(spacing: 0) {
+            if placement == .leading, let presenter, let context, !context.isHidden {
+                presenter(context)
+            }
+
             content
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    if !context.isHidden {
+                    if placement == .bottom, let presenter, let context, !context.isHidden {
                         VStack(spacing: 0) {
                             if let inner = accessory?.children.first {
                                 NodeView(node: inner)
@@ -1165,8 +1280,11 @@ private struct CustomTabPresentationModifier: ViewModifier {
                         }
                     }
                 }
-        } else {
-            content
+                .overlay(alignment: .bottomTrailing) {
+                    if presenter != nil, let overlay, let context, !context.isHidden {
+                        overlay(context)
+                    }
+                }
         }
     }
 }
@@ -1178,13 +1296,12 @@ private struct SystemTabBarSuppressionModifier: ViewModifier {
     let suppressed: Bool
 
     func body(content: Content) -> some View {
-        if suppressed {
-            content
-                .toolbar(.hidden, for: .tabBar)
-                .ignoresSafeArea(.container, edges: .bottom)
-        } else {
-            content
-        }
+        // No if/else on purpose: a branch would give each tab's content a
+        // new identity whenever a presentation switches on or off, losing
+        // scroll position and pushed screens on rotate or fold.
+        content
+            .toolbar(suppressed ? .hidden : .automatic, for: .tabBar)
+            .ignoresSafeArea(.container, edges: suppressed ? .bottom : [])
     }
 }
 
