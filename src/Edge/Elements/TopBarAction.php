@@ -55,6 +55,9 @@ class TopBarAction extends Element
         if (isset($attrs['disabled'])) {
             $this->props['disabled'] = (bool) $attrs['disabled'];
         }
+        if (isset($attrs['hidden_with_tab_presentation'])) {
+            $this->props['hidden_with_tab_presentation'] = (bool) $attrs['hidden_with_tab_presentation'];
+        }
         if (isset($attrs['divider'])) {
             $this->props['divider'] = (bool) $attrs['divider'];
         }

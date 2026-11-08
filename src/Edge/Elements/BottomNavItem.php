@@ -55,6 +55,7 @@ class BottomNavItem extends Element
             'material-variant' => 'material_variant',
             'search-placeholder' => 'search_placeholder',
             'search-debounce-ms' => 'search_debounce_ms',
+            'presentation-only' => 'presentation_only',
         ] as $kebab => $canonical) {
             if (isset($attrs[$kebab]) && ! isset($attrs[$canonical])) {
                 $attrs[$canonical] = $attrs[$kebab];
@@ -80,6 +81,10 @@ class BottomNavItem extends Element
 
         if (isset($attrs['news'])) {
             $this->props['news'] = filter_var($attrs['news'], FILTER_VALIDATE_BOOLEAN);
+        }
+
+        if (isset($attrs['presentation_only'])) {
+            $this->props['presentation_only'] = filter_var($attrs['presentation_only'], FILTER_VALIDATE_BOOLEAN);
         }
 
         if (isset($attrs['search'])) {

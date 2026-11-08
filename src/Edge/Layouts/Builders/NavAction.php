@@ -37,6 +37,8 @@ class NavAction
 
     private bool $disabled = false;
 
+    private bool $hiddenWithTabPresentation = false;
+
     /**
      * Marks this action as a visual divider rather than a tappable row.
      * Use [divider] to construct one — when set, the renderer emits a
@@ -157,6 +159,18 @@ class NavAction
     }
 
     /**
+     * Leave this action off the nav bar while a custom tab presentation
+     * (a side rail) is showing, for actions the presentation already
+     * offers. The narrow layout keeps it. iOS only; Android ignores it.
+     */
+    public function hiddenWithTabPresentation(bool $hidden = true): self
+    {
+        $this->hiddenWithTabPresentation = $hidden;
+
+        return $this;
+    }
+
+    /**
      * Attach sub-items so this action renders as a pull-down menu instead
      * of a plain button. Tapping the bar's icon reveals a SwiftUI `Menu`
      * (iOS) / Compose `DropdownMenu` (Android) of these items. Each
@@ -220,6 +234,9 @@ class NavAction
         }
         if ($this->disabled) {
             $attrs['disabled'] = true;
+        }
+        if ($this->hiddenWithTabPresentation) {
+            $attrs['hidden_with_tab_presentation'] = true;
         }
 
         $action->applyAttributes($attrs);

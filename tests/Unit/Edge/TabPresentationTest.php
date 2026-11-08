@@ -2,9 +2,12 @@
 
 use Native\Mobile\Edge\CallbackRegistry;
 use Native\Mobile\Edge\Elements\NativeRootTabs;
+use Native\Mobile\Edge\Layouts\Builders\Tab;
 use Native\Mobile\Edge\Layouts\Builders\TabBar;
+use Native\Mobile\Edge\Layouts\TabPresentationPlacement;
 use Native\Mobile\Testing\Native;
 use Tests\Fixtures\Edge\ChromeScreen;
+use Tests\Fixtures\Edge\LeadingPresentationTabsLayout;
 use Tests\Fixtures\Edge\PresentationTabsLayout;
 
 beforeEach(function () {
@@ -135,3 +138,62 @@ it('rejects top-level lists, excessive depth, and excessive encoded size', funct
     'depth' => [['a' => ['b' => ['c' => ['d' => ['e' => ['f' => ['g' => ['h' => ['i' => true]]]]]]]]]],
     'size' => [['value' => str_repeat('x', TabBar::MAX_PRESENTATION_CONFIGURATION_BYTES)]],
 ])->throws(InvalidArgumentException::class);
+
+it('emits no new props for a plain presentation', function () {
+    $props = TabBar::make()->presentation('acme:floating', ['radius' => 24])->toRootProps();
+
+    expect($props)->not->toHaveKeys([
+        'tabPresentationPlacement',
+        'tabPresentationMinWidth',
+        'tabPresentationMinHeight',
+        'tabPresentationKeepsOnPush',
+    ]);
+});
+
+it('serializes a leading, wide-only, push-persistent presentation', function () {
+    $props = TabBar::make()
+        ->presentation('acme:rail', ['x' => 1], TabPresentationPlacement::Leading, 900, 600, true)
+        ->toRootProps();
+
+    expect($props)
+        ->tabPresentationPlacement->toBe('leading')
+        ->tabPresentationMinWidth->toBe(900)
+        ->tabPresentationMinHeight->toBe(600)
+        ->tabPresentationKeepsOnPush->toBeTrue();
+
+    $tree = Native::test(ChromeScreen::class, layout: LeadingPresentationTabsLayout::class)->tree();
+
+    expect($tree['type'])->toBe('native_root_tabs')
+        ->and($tree['props'])
+        ->tab_presentation_placement->toBe('leading')
+        ->tab_presentation_min_width->toBe(900)
+        ->tab_presentation_min_height->toBe(600)
+        ->tab_presentation_keeps_on_push->toBeTrue();
+});
+
+it('preserves placement and limits through element conversion', function () {
+    $element = TabBar::make()
+        ->presentation('acme:rail', [], TabPresentationPlacement::Leading, 900, null, true)
+        ->toElement();
+
+    expect(TabBar::fromElement($element)->toRootProps())
+        ->tabPresentationPlacement->toBe('leading')
+        ->tabPresentationMinWidth->toBe(900)
+        ->tabPresentationKeepsOnPush->toBeTrue()
+        ->not->toHaveKey('tabPresentationMinHeight');
+});
+
+it('rejects non-positive minimums', function (array $arguments) {
+    TabBar::make()->presentation('acme:rail', ...$arguments);
+})->with([
+    'zero width' => [['minimumWidth' => 0]],
+    'negative height' => [['minimumHeight' => -1]],
+])->throws(InvalidArgumentException::class);
+
+it('marks presentation-only tabs', function () {
+    $props = Tab::action('Search')->presentationOnly()->toElement()->toArray(new CallbackRegistry)['props'];
+    $plain = Tab::link('Home', '/')->toElement()->toArray(new CallbackRegistry)['props'];
+
+    expect($props)->presentation_only->toBeTrue()
+        ->and($plain)->not->toHaveKey('presentation_only');
+});

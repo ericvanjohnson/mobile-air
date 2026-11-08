@@ -5,6 +5,7 @@ namespace Native\Mobile\Edge\Layouts\Builders;
 use InvalidArgumentException;
 use Native\Mobile\Edge\Elements\BottomNav;
 use Native\Mobile\Edge\Elements\BottomNavItem;
+use Native\Mobile\Edge\Layouts\TabPresentationPlacement;
 use Native\Mobile\Edge\NativeRouter;
 
 /**
@@ -64,6 +65,14 @@ class TabBar
 
     private ?string $presentationConfiguration = null;
 
+    private TabPresentationPlacement $presentationPlacement = TabPresentationPlacement::Bottom;
+
+    private ?int $presentationMinimumWidth = null;
+
+    private ?int $presentationMinimumHeight = null;
+
+    private bool $presentationKeepsOnPush = false;
+
     public static function make(): self
     {
         return new self;
@@ -93,6 +102,10 @@ class TabBar
         $bar->minimizeOnScroll = (bool) ($props['minimize_on_scroll'] ?? false);
         $bar->presentationIdentifier = $props['tab_presentation_id'] ?? null;
         $bar->presentationConfiguration = $props['tab_presentation_configuration'] ?? null;
+        $bar->presentationPlacement = TabPresentationPlacement::tryFrom((string) ($props['tab_presentation_placement'] ?? '')) ?? TabPresentationPlacement::Bottom;
+        $bar->presentationMinimumWidth = $props['tab_presentation_min_width'] ?? null;
+        $bar->presentationMinimumHeight = $props['tab_presentation_min_height'] ?? null;
+        $bar->presentationKeepsOnPush = (bool) ($props['tab_presentation_keeps_on_push'] ?? false);
 
         foreach ($element->getChildren() as $child) {
             if ($child instanceof BottomNavItem) {
@@ -207,9 +220,28 @@ class TabBar
      * navigation stacks. The identifier only selects a registered visual
      * presenter; the bounded JSON configuration contains presenter-specific
      * design tokens.
+     *
+     * `placement` asks for the leading edge instead of the bottom. The
+     * minimums limit the presentation to windows at least that many points
+     * wide or tall (smaller windows keep the stock bar). `keepsOnPush`
+     * keeps the presentation visible when a screen is pushed on top.
      */
-    public function presentation(string $identifier, array $configuration = []): self
-    {
+    public function presentation(
+        string $identifier,
+        array $configuration = [],
+        TabPresentationPlacement $placement = TabPresentationPlacement::Bottom,
+        ?int $minimumWidth = null,
+        ?int $minimumHeight = null,
+        bool $keepsOnPush = false,
+    ): self {
+        if ($minimumWidth !== null && $minimumWidth < 1) {
+            throw new InvalidArgumentException('Tab presentation minimum width must be a positive number of points.');
+        }
+
+        if ($minimumHeight !== null && $minimumHeight < 1) {
+            throw new InvalidArgumentException('Tab presentation minimum height must be a positive number of points.');
+        }
+
         if (
             strlen($identifier) > self::MAX_PRESENTATION_IDENTIFIER_LENGTH
             || preg_match('/\A[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[a-z0-9]+(?:[._-][a-z0-9]+)*)?\z/', $identifier) !== 1
@@ -239,8 +271,33 @@ class TabBar
 
         $this->presentationIdentifier = $identifier;
         $this->presentationConfiguration = $json;
+        $this->presentationPlacement = $placement;
+        $this->presentationMinimumWidth = $minimumWidth;
+        $this->presentationMinimumHeight = $minimumHeight;
+        $this->presentationKeepsOnPush = $keepsOnPush;
 
         return $this;
+    }
+
+    /** @return array<string, mixed> */
+    private function presentationLayoutAttributes(): array
+    {
+        $attrs = [];
+
+        if ($this->presentationPlacement !== TabPresentationPlacement::Bottom) {
+            $attrs['tabPresentationPlacement'] = $this->presentationPlacement->value;
+        }
+        if ($this->presentationMinimumWidth !== null) {
+            $attrs['tabPresentationMinWidth'] = $this->presentationMinimumWidth;
+        }
+        if ($this->presentationMinimumHeight !== null) {
+            $attrs['tabPresentationMinHeight'] = $this->presentationMinimumHeight;
+        }
+        if ($this->presentationKeepsOnPush) {
+            $attrs['tabPresentationKeepsOnPush'] = true;
+        }
+
+        return $attrs;
     }
 
     private static function assertConfigurationValues(array $configuration): void
@@ -347,6 +404,7 @@ class TabBar
         if ($this->presentationIdentifier !== null) {
             $attrs['tabPresentationId'] = $this->presentationIdentifier;
             $attrs['tabPresentationConfiguration'] = $this->presentationConfiguration;
+            $attrs += $this->presentationLayoutAttributes();
         }
 
         return $attrs;
@@ -405,6 +463,7 @@ class TabBar
         if ($this->presentationIdentifier !== null) {
             $attrs['tabPresentationId'] = $this->presentationIdentifier;
             $attrs['tabPresentationConfiguration'] = $this->presentationConfiguration;
+            $attrs += $this->presentationLayoutAttributes();
         }
 
         $nav->applyAttributes($attrs);

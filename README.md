@@ -50,6 +50,46 @@ and action tabs do not send reselect callbacks. Without a handler, existing tab
 behavior is unchanged. The callback does not scroll or refresh automatically;
 your component decides what a reselect does.
 
+## Showing the tab bar on the leading edge on wide windows
+
+A registered tab presentation can ask for the leading edge instead of the
+bottom, only when the window is wide enough, and can stay visible when a screen
+is pushed on top:
+
+```php
+TabBar::make()
+    ->add(Tab::link('Home', '/home', icon: 'home'))
+    ->add(Tab::action('Search', icon: 'search')->presentationOnly())
+    ->presentation(
+        'acme:rail',
+        placement: TabPresentationPlacement::Leading,
+        minimumWidth: 900,
+        minimumHeight: 600,
+        keepsOnPush: true,
+    );
+```
+
+The minimums are in points and must be positive. Smaller windows keep the
+stock tab bar, and without a registered presenter nothing changes. A
+`presentationOnly()` tab is only drawn by the presentation, never by the stock
+iOS or Android bar. For inline chrome the same settings are
+`tab-presentation-placement`, `tab-presentation-min-width`,
+`tab-presentation-min-height` and `tab-presentation-keeps-on-push` on
+`<native:bottom-nav>`, and `presentation-only` on the item.
+
+The placement, the size minimums and keeps-on-push are iOS only. Android
+ignores them and always shows an Android presenter when one is registered.
+
+A nav-bar action the presentation already offers can step aside while it
+shows: `NavAction::make('search')->hiddenWithTabPresentation()` drops it from
+the bar on iOS whenever the presentation is active and keeps it otherwise
+(Android ignores it).
+
+On iOS a plugin can also register an overlay next to its presenter with
+`register(identifier:presenter:overlay:)`. The overlay is drawn in the
+bottom-trailing corner over the screen's content while the presenter is
+showing, which suits a floating button.
+
 ## Contributing
 
 Thank you for considering contributing to NativePHP for Mobile! The contribution guide can be found in the [NativePHP documentation](https://nativephp.com/docs/mobile/getting-started/contributing).

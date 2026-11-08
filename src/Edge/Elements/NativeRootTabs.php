@@ -77,6 +77,18 @@ class NativeRootTabs extends Element
         if (isset($attrs['tabPresentationConfiguration'])) {
             $this->props['tab_presentation_configuration'] = $attrs['tabPresentationConfiguration'];
         }
+        if (isset($attrs['tabPresentationPlacement'])) {
+            $this->props['tab_presentation_placement'] = $attrs['tabPresentationPlacement'];
+        }
+        if (isset($attrs['tabPresentationMinWidth'])) {
+            $this->props['tab_presentation_min_width'] = (int) $attrs['tabPresentationMinWidth'];
+        }
+        if (isset($attrs['tabPresentationMinHeight'])) {
+            $this->props['tab_presentation_min_height'] = (int) $attrs['tabPresentationMinHeight'];
+        }
+        if (isset($attrs['tabPresentationKeepsOnPush'])) {
+            $this->props['tab_presentation_keeps_on_push'] = (bool) $attrs['tabPresentationKeepsOnPush'];
+        }
 
         // Optional folded NavBar config (when this layout supplies both bars).
         if (isset($attrs['navTitle'])) {

@@ -63,6 +63,8 @@ class Tab
 
     private ?string $reselectMethod = null;
 
+    private bool $presentationOnly = false;
+
     private function __construct(string $id, string $label, string $url)
     {
         $this->id = $id;
@@ -161,6 +163,18 @@ class Tab
     public function onReselect(string $method): self
     {
         $this->reselectMethod = $method;
+
+        return $this;
+    }
+
+    /**
+     * Keep this tab out of the stock tab bar. Only a registered tab
+     * presentation shows it, so a screen can offer an entry (a rail-only
+     * search, say) that the bottom bar never draws.
+     */
+    public function presentationOnly(bool $only = true): self
+    {
+        $this->presentationOnly = $only;
 
         return $this;
     }
@@ -269,6 +283,9 @@ class Tab
             $attrs['search_placeholder'] = $this->searchPlaceholder;
         }
         $attrs['search_debounce_ms'] = $this->searchDebounceMs;
+        if ($this->presentationOnly) {
+            $attrs['presentation_only'] = true;
+        }
 
         $item->applyAttributes($attrs);
 

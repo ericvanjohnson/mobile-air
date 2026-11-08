@@ -422,7 +422,8 @@ fun NativeRootTabsRenderer(node: NativeUINode, modifier: Modifier = Modifier) {
                     else
                         NavigationBarDefaults.containerColor
                 ) {
-                    visibleTabEntries.forEach { (actualIdx, tab) ->
+                    // Presentation-only tabs belong to custom presenters, never the stock bar.
+                    visibleTabEntries.filterNot { (_, tab) -> tab.props.getBool("presentation_only") }.forEach { (actualIdx, tab) ->
                         val label = tab.props.getString("label", "")
                         val icon = tab.props.getString("icon", "circle")
                         val badge = tab.props.getString("badge", "")

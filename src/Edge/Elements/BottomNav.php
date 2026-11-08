@@ -29,6 +29,10 @@ class BottomNav extends Element
             'minimize-on-scroll' => 'minimizeOnScroll',
             'tab-presentation-id' => 'tabPresentationId',
             'tab-presentation-configuration' => 'tabPresentationConfiguration',
+            'tab-presentation-placement' => 'tabPresentationPlacement',
+            'tab-presentation-min-width' => 'tabPresentationMinWidth',
+            'tab-presentation-min-height' => 'tabPresentationMinHeight',
+            'tab-presentation-keeps-on-push' => 'tabPresentationKeepsOnPush',
         ] as $kebab => $camel) {
             if (isset($attrs[$kebab]) && ! isset($attrs[$camel])) {
                 $attrs[$camel] = $attrs[$kebab];
@@ -69,6 +73,22 @@ class BottomNav extends Element
 
         if (isset($attrs['tabPresentationConfiguration'])) {
             $this->props['tab_presentation_configuration'] = $attrs['tabPresentationConfiguration'];
+        }
+
+        if (isset($attrs['tabPresentationPlacement'])) {
+            $this->props['tab_presentation_placement'] = $attrs['tabPresentationPlacement'];
+        }
+
+        if (isset($attrs['tabPresentationMinWidth'])) {
+            $this->props['tab_presentation_min_width'] = (int) $attrs['tabPresentationMinWidth'];
+        }
+
+        if (isset($attrs['tabPresentationMinHeight'])) {
+            $this->props['tab_presentation_min_height'] = (int) $attrs['tabPresentationMinHeight'];
+        }
+
+        if (isset($attrs['tabPresentationKeepsOnPush'])) {
+            $this->props['tab_presentation_keeps_on_push'] = filter_var($attrs['tabPresentationKeepsOnPush'], FILTER_VALIDATE_BOOLEAN);
         }
 
         if (! empty($attrs['custom'])) {
